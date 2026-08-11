@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+*.local
+.env
+
+# IDE / build cache
+.idea
+.vite
+
+# Claude Code local-only files
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
