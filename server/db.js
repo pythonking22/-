@@ -4,7 +4,11 @@ import pg from 'pg'
 const { Pool } = pg
 
 // Supabase Session pooler를 쓴다 — 계속 떠 있는 Express 서버에 맞고, 모든 쿼리가 비동기다.
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+// Supabase 무료 플랜의 세션 풀러는 전체 동시 접속을 15개로 제한한다(EMAXCONNSESSION). 기본값
+// (max: 10)만으로도 buildStateForUser 하나가 쿼리 8개를 동시에 날리는데, 배포가 재시작을
+// 반복하면 죽은 이전 프로세스의 커넥션이 바로 안 풀려서 새 프로세스 것과 겹쳐 15개를 넘기고,
+// 그러면 또 죽는 재시작 루프에 빠진다 — max를 낮게 잡아 인스턴스 하나당 점유량을 줄인다.
+export const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 5 })
 
 // pg.Pool은 유휴 커넥션이 네트워크 문제로 끊기면 'error' 이벤트를 낸다. 리스너가 없으면
 // Node가 이걸 uncaught exception으로 취급해서 서버 프로세스 전체가 죽는다 — 일시적인

@@ -10,6 +10,15 @@ import { getClipPredictor, predictDrawing, SPECIES as CLIP_SPECIES } from './cli
 import { pool, dbReady, generateUid, hashPassword, verifyPassword } from './db.js'
 import { createRepresentativeCharacter } from '../src/data/representativeCharacter.js'
 
+// 라우트 핸들러 안의 await(대부분 DB 쿼리)가 실패하면 아무도 안 잡은 rejection이 되는데,
+// Node는 기본적으로 이걸 uncaught exception과 똑같이 취급해서 프로세스 전체를 죽인다 — 사용자
+// 한 명의 요청 하나가 실패했을 뿐인데 모든 사용자가 접속 불가가 되고, Render가 재시작해도
+// 죽은 프로세스의 DB 커넥션이 바로 안 풀려서 재시작 직후 또 죽는 루프에 빠지는 원인이었다.
+// pool.on('error')와 같은 이유로, 여기서도 리스너를 등록해 서버가 계속 떠 있게 한다.
+process.on('unhandledRejection', (err) => {
+  console.error('[server] unhandled rejection (server가 계속 떠 있도록 무시함):', err)
+})
+
 // predict_insect.py를 서버 사이드로 옮긴 것. iNaturalist 개인 토큰을 프론트엔드 번들에
 // 노출하지 않기 위해, 사진 업로드는 항상 이 프록시를 거쳐 iNaturalist API를 호출한다.
 const TARGET_SPECIES = INSECT_SPECIES.map((s) => ({ name: s.name, scientificName: s.scientificName || null, feature: s.feature || '' }))
