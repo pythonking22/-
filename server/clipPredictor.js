@@ -117,11 +117,14 @@ let predictorPromise
 export function getClipPredictor() {
   if (!predictorPromise) {
     predictorPromise = (async () => {
+      // CLIP ViT-B/32는 fp32 그대로 불러오면 가중치만 ~600MB라 Render 무료 플랜의 512MB RAM
+      // 한도를 그 자체로 넘겨서 OOM으로 계속 죽었다(Events 로그: "Ran out of memory (used
+      // over 512MB)") — q8(int8 양자화) 버전을 불러와 가중치 용량을 4분의 1 수준으로 줄인다.
       const [processor, tokenizer, textModel, visionModel] = await Promise.all([
         AutoProcessor.from_pretrained(MODEL_ID),
         AutoTokenizer.from_pretrained(MODEL_ID),
-        CLIPTextModelWithProjection.from_pretrained(MODEL_ID),
-        CLIPVisionModelWithProjection.from_pretrained(MODEL_ID),
+        CLIPTextModelWithProjection.from_pretrained(MODEL_ID, { dtype: 'q8' }),
+        CLIPVisionModelWithProjection.from_pretrained(MODEL_ID, { dtype: 'q8' }),
       ])
       const candidatePrompts = SPECIES.map((item) => `a child's drawing of a ${item.en_name}, a doodle or sketch`)
       const descriptions = SPECIES.map((item) => item.description)
