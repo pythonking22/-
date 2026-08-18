@@ -132,15 +132,31 @@ export function getClipPredictor() {
         textModel(tokenizer(candidatePrompts, { padding: true, truncation: true })),
         textModel(tokenizer(descriptions, { padding: true, truncation: true })),
       ])
-      const referenceImages = []
-      for (const species of SPECIES) {
-        const id = String(species.id).padStart(2, '0')
-        const imagePath = path.join(ROOT_DIR, 'public', 'insects-original', `${id}.png`)
-        try { referenceImages.push(await RawImage.read(imagePath)) } catch { referenceImages.push(null) }
+      // 79장을 한 번에 배치로 vision model에 넣으면(예전 방식) 트랜스포머 중간 activation이
+      // 배치 크기만큼 한꺼번에 쌓여서, 가중치를 q8로 줄여도 시작 시점 메모리가 크게 튄다
+      // (Events 로그: OOM + status 137 강제종료가 이 79장 배치 처리 시점과 맞물렸다). 작은
+      // 묶음으로 나눠 순차 처리하면 이 순간의 최대 메모리 사용량을 배치 크기만큼으로 제한한다.
+      const REFERENCE_BATCH_SIZE = 8
+      const referenceEmbeddingChunks = []
+      for (let start = 0; start < SPECIES.length; start += REFERENCE_BATCH_SIZE) {
+        const batchSpecies = SPECIES.slice(start, start + REFERENCE_BATCH_SIZE)
+        const batchImages = []
+        for (const species of batchSpecies) {
+          const id = String(species.id).padStart(2, '0')
+          const imagePath = path.join(ROOT_DIR, 'public', 'insects-original', `${id}.png`)
+          try { batchImages.push(await RawImage.read(imagePath)) } catch { /* 이미지 없는 종은 건너뜀 */ }
+        }
+        if (!batchImages.length) continue
+        const batchOutput = await visionModel(await processor(batchImages))
+        referenceEmbeddingChunks.push(normalize(batchOutput.image_embeds))
       }
-      const validReferences = referenceImages.filter(Boolean)
-      const referenceOutput = validReferences.length ? await visionModel(await processor(validReferences)) : null
-      const referenceFeatures = referenceOutput ? normalize(referenceOutput.image_embeds) : null
+      const referenceFeatures = referenceEmbeddingChunks.length
+        ? {
+            data: Float32Array.from(referenceEmbeddingChunks.flatMap((chunk) => Array.from(chunk.data))),
+            rows: referenceEmbeddingChunks.reduce((sum, chunk) => sum + chunk.rows, 0),
+            width: referenceEmbeddingChunks[0].width,
+          }
+        : null
       let trainedSketchModel = null
       try { trainedSketchModel = JSON.parse(await fs.readFile(TRAINED_MODEL_PATH, 'utf8')) } catch { /* training data is optional */ }
       return { processor, tokenizer, textModel, visionModel, candidateFeatures: normalize(candidateOutput.text_embeds), descriptionFeatures: normalize(descriptionOutput.text_embeds), referenceFeatures, trainedSketchModel }
