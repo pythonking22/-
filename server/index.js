@@ -156,12 +156,16 @@ app.post('/api/classify-insect', upload.single('image'), async (req, res) => {
       const commonName = taxon.preferred_common_name || ''
       const apiSciName = taxon.name || ''
       // combined_score는 iNaturalist API가 이미 0~100 스케일로 반환한다 (0~1 스케일이 아님).
-      const score = result.combined_score || 0
+      const score = Math.max(0, Math.min(100, result.combined_score || 0))
       const target = TARGET_SPECIES.find(
         (t) => sciMatches(apiSciName, t.scientificName) || (commonName && commonName.includes(t.name))
       )
       if (target && !matched.some((m) => m.name === target.name)) {
-        matched.push({ name: target.name, commonName, scientificName: apiSciName, confidence: Math.round(score), feature: target.feature })
+        // Math.round는 0.x%대의 낮지만 실재하는 일치율을 0%로 뭉개버려서, 실제로 찾아낸 후보인데도
+        // "일치율 0%"로 보여 마치 못 찾은 것처럼 보이는 버그가 있었다. 소수점 둘째 자리까지 보존하고,
+        // 점수가 0보다 크면 최소 0.01%는 보이게 한다(진짜 0점인 경우만 0%로 남는다).
+        const confidence = score > 0 ? Math.max(0.01, Number(score.toFixed(2))) : 0
+        matched.push({ name: target.name, commonName, scientificName: apiSciName, confidence, feature: target.feature })
       }
     }
 
@@ -232,6 +236,7 @@ function buildSystemPrompt(context) {
 - 사용자가 인사만 하면 "안녕, 나는 ${companionName}이야. 지금은 [곤충 이름]에 대해 알아보고 있어."처럼 짧게 네 이름과 학습 주제를 소개하며 인사를 받아 줘. 특징 목록이나 안전 규칙을 인사에 덧붙이지 마.
 - 사용자가 "누구야?"라고 물으면 "나는 ${companionName}이야"라고 답하고, 지금 공부 중인 곤충 이름도 함께 알려 줘.
 - 대화가 이어지면 앞선 질문·답변을 기억하고 자연스럽게 이어서 반응해, 이미 답한 내용을 다시 묻지 마.
+- 질문이 짧거나 무엇을 가리키는지 불분명하면(예: "어떤 종류가 있어?", "왜 그래?") 학습 주제 곤충 자체 설명으로 돌아가지 말고, 바로 직전 네 답변이나 사용자의 이전 질문 주제를 이어받아 그 후속 질문으로 해석해.
 - 현재 맥락: ${contextText}
 - 곤충·자연에 관한 질문을 우선 도와줘. 모르는 사실, 종을 확정할 수 없는 내용은 추측하지 말고
   '확실히 알기 어렵다'고 말한 뒤 사진, 크기, 색, 발견 장소처럼 확인에 필요한 정보를 물어봐.
@@ -269,13 +274,13 @@ app.post('/chat', async (req, res) => {
     const companionName = context.companionName || '알'
     messages.push({
       role: 'system',
-      content: `대화 직전 확인: 지금 학습 주제 곤충은 ${observed.name}이야. 너는 ${companionName}이야, 이 곤충을 3인칭으로 설명해. 곤충을 연기하지 말고, 어떤 곤충을 보고 있는지 되묻지 마. 도감 설명은 "${observed.feature || '없음'}", 서식지는 "${observed.habitat || '알 수 없음'}"이야.`,
+      content: `대화 직전 확인: 지금 학습 주제 곤충은 ${observed.name}이야. 너는 ${companionName}이야, 이 곤충을 3인칭으로 설명해. 곤충을 연기하지 말고, 어떤 곤충을 보고 있는지 되묻지 마. 도감 설명은 "${observed.feature || '없음'}", 서식지는 "${observed.habitat || '알 수 없음'}"이야. 단, 사용자의 질문이 직전 대화(예: 천적, 먹이 등 이미 나온 화제)를 이어받는 후속 질문으로 보이면 그 흐름을 우선하고, 이 정보를 이유로 학습 주제 곤충 자체 설명으로 억지로 되돌아가지 마.`,
     })
   }
 
   const imageDataUrl = context.observedInsect?.imageDataUrl
   const groundedMessage = context.observedInsect?.name
-    ? `[도감 참고 정보 — 이 내용을 바탕으로 답해] 곤충: ${context.observedInsect.name}; 서식지: ${context.observedInsect.habitat || '알 수 없음'}; 특징: ${context.observedInsect.feature || '알 수 없음'}\n[사용자 질문] ${message}`
+    ? `[도감 참고 정보 — 질문이 학습 주제 곤충 자체에 대한 것일 때만 이 내용을 바탕으로 답해. 직전 대화를 이어받는 후속 질문이면 이 정보보다 대화 맥락을 우선해] 곤충: ${context.observedInsect.name}; 서식지: ${context.observedInsect.habitat || '알 수 없음'}; 특징: ${context.observedInsect.feature || '알 수 없음'}\n[사용자 질문] ${message}`
     : message
   if (typeof imageDataUrl === 'string' && imageDataUrl.startsWith('data:image/')) {
     messages.push({
@@ -451,7 +456,7 @@ async function buildStateForUser(user) {
       [userId]
     ).then((r) => r.rows),
     pool.query(
-      "SELECT key, value FROM user_state WHERE user_id = $1 AND key IN ('bagItems', 'placements', 'profileCharacterId', 'primaryTitleId', 'representativeAdultHistory')",
+      "SELECT key, value FROM user_state WHERE user_id = $1 AND key IN ('bagItems', 'placements', 'profileCharacterId', 'primaryTitleId', 'primaryBadgeId', 'representativeAdultHistory')",
       [userId]
     ).then((r) => r.rows),
   ])
@@ -600,12 +605,10 @@ async function claimLifetimeMissions(userId, type, codes) {
   }
 }
 
+// 클라이언트(resolveAchievementProgress/resolveTitleMissionIds)가 이미 "한 번 뽑은 목록은 다시
+// 섞지 않는다"를 책임지고 있으므로, 여기서는 그 목록에 있는 코드를 빠짐없이 upsert만 하면 된다
+// (ON CONFLICT DO NOTHING이라 이미 있는 코드는 그대로 두고, 새로 늘어난 코드만 추가된다).
 async function insertMissionPoolOnce(userId, type, codes) {
-  const { rows } = await pool.query(
-    `SELECT 1 FROM user_mission_pool up JOIN mission_definition m ON m.id = up.mission_definition_id WHERE up.user_id = $1 AND m.type = $2 LIMIT 1`,
-    [userId, type]
-  )
-  if (rows.length) return // 이미 한 번 뽑아서 고정해뒀으면 다시 안 건드린다.
   const missionDefByCode = await getMissionDefByCode()
   for (const code of codes) {
     const def = missionDefByCode[code]
@@ -789,6 +792,7 @@ app.put('/api/state/:uid/:key', async (req, res) => {
     case 'placements':
     case 'profileCharacterId':
     case 'primaryTitleId':
+    case 'primaryBadgeId':
     case 'representativeAdultHistory':
       await pool.query(
         `INSERT INTO user_state (user_id, key, value, updated_at) VALUES ($1, $2, $3, now())
@@ -801,89 +805,6 @@ app.put('/api/state/:uid/:key', async (req, res) => {
       break
   }
 
-  res.json({ success: true })
-})
-
-app.post('/api/signup', async (req, res) => {
-  const { username, password, nickname } = req.body || {}
-  if (!username || !password || !nickname) {
-    return res.status(400).json({ error: 'MISSING_FIELDS' })
-  }
-  const { rows: existing } = await pool.query('SELECT 1 FROM users WHERE username = $1', [username])
-  if (existing.length) {
-    return res.status(409).json({ error: 'USERNAME_TAKEN' })
-  }
-  const uid = await issueUid()
-  const passwordHash = hashPassword(password)
-  const today = todayDateKey()
-  const { rows: inserted } = await pool.query(
-    'INSERT INTO users (uid, username, password_hash, nickname, total_login_days, last_login_date) VALUES ($1, $2, $3, $4, 1, $5) RETURNING id',
-    [uid, username, passwordHash, nickname, today]
-  )
-  const userId = inserted[0].id
-  // 대표 캐릭터(알)는 계정마다 6종 중 하나로 무작위 배정하고 첫 단계는 항상 "알"이다.
-  await upsertRepresentativeCharacter(userId, createRepresentativeCharacter())
-  const { rows: userRows } = await pool.query(
-    'SELECT id, uid, username, nickname, total_login_days AS "totalLoginDays" FROM users WHERE id = $1',
-    [userId]
-  )
-  res.status(201).json({ user: userRows[0] })
-})
-
-app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body || {}
-  if (!username || !password) {
-    return res.status(400).json({ error: 'MISSING_FIELDS' })
-  }
-  const { rows } = await pool.query(
-    'SELECT id, uid, username, nickname, password_hash, total_login_days, last_login_date FROM users WHERE username = $1',
-    [username]
-  )
-  const row = rows[0]
-  if (!row || !verifyPassword(password, row.password_hash)) {
-    return res.status(401).json({ error: 'INVALID_CREDENTIALS' })
-  }
-  const today = todayDateKey()
-  let totalLoginDays = row.total_login_days
-  if (row.last_login_date !== today) {
-    totalLoginDays += 1
-    await pool.query('UPDATE users SET total_login_days = $1, last_login_date = $2 WHERE id = $3', [totalLoginDays, today, row.id])
-  }
-  // 이 기능이 생기기 전에 가입한 계정은 대표 캐릭터가 없으니 로그인 시점에 하나 배정해 채운다.
-  const { rows: repCharRows } = await pool.query(
-    "SELECT 1 FROM user_state WHERE user_id = $1 AND key = 'representativeCharacter'",
-    [row.id]
-  )
-  if (!repCharRows.length) {
-    await upsertRepresentativeCharacter(row.id, createRepresentativeCharacter())
-  }
-  res.json({ user: { id: row.id, uid: row.uid, username: row.username, nickname: row.nickname, totalLoginDays } })
-})
-
-app.get('/api/state/:uid', async (req, res) => {
-  const user = await getUserByUid(req.params.uid)
-  if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' })
-  const { rows } = await pool.query('SELECT key, value FROM user_state WHERE user_id = $1', [user.id])
-  const state = {}
-  for (const row of rows) {
-    try {
-      state[row.key] = JSON.parse(row.value)
-    } catch {
-      state[row.key] = null
-    }
-  }
-  res.json({ state })
-})
-
-app.put('/api/state/:uid/:key', async (req, res) => {
-  const user = await getUserByUid(req.params.uid)
-  if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' })
-  const value = JSON.stringify(req.body?.value ?? null)
-  await pool.query(
-    `INSERT INTO user_state (user_id, key, value, updated_at) VALUES ($1, $2, $3, now())
-     ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    [user.id, req.params.key, value]
-  )
   res.json({ success: true })
 })
 
@@ -1008,7 +929,10 @@ app.get('/api/guestbook/:ownerUid', async (req, res) => {
 // 친구 목장 방문(Friends.jsx)용 읽기 전용 스냅샷 — 대객체 위치/크기, 배치한 인테리어,
 // 서식지별 등록 현황을 돌려준다. 도감 원본 데이터(사진/그림 dataURL 등)는 내려주지 않는다.
 app.get('/api/ranch/:uid', async (req, res) => {
-  const { rows } = await pool.query('SELECT id, username, nickname FROM users WHERE uid = $1', [req.params.uid])
+  const { rows } = await pool.query(
+    'SELECT id, username, nickname, total_login_days AS "totalLoginDays" FROM users WHERE uid = $1',
+    [req.params.uid]
+  )
   const target = rows[0]
   if (!target) return res.status(404).json({ error: 'USER_NOT_FOUND' })
 
@@ -1023,12 +947,20 @@ app.get('/api/ranch/:uid', async (req, res) => {
     habitatStats[habitat.id] = getHabitatStats(habitat.id, speciesList)
   }
 
+  // 친구 목장 방문 시 프로필 카드(FriendRanch.jsx)를 눌러 보여줄 정보 — 자기 목장 프로필
+  // 모달과 같은 항목(대표 캐릭터/도감/성장 포인트/출석/나뭇잎)을 읽기 전용으로 노출한다.
   res.json({
     nickname: target.nickname,
     positions: state.habitatPositions || null,
     scales: state.habitatScales || null,
     placements: Array.isArray(state.placements) ? state.placements : [],
     habitatStats,
+    representativeCharacter: state.representativeCharacter || null,
+    growthPoints: state.growthPoints ?? 0,
+    leaves: state.leaves ?? 0,
+    totalLoginDays: target.totalLoginDays ?? 0,
+    fieldGuideCount: speciesList.filter((s) => s.registered).length,
+    fieldGuideTotal: speciesList.length,
   })
 })
 
